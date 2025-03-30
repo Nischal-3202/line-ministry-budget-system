@@ -383,4 +383,98 @@ router.post('/salaries/request-monthly', verifyToken, (req, res) => {
   );
 });
 
+// ✅ Bulk approve all pending fund requests
+router.post('/approve-all', verifyToken, (req, res) => {
+  if (req.user.role !== 1) {
+    return res.status(403).json({ message: 'Only Admins can bulk approve requests' });
+  }
+
+  db.query(
+    'UPDATE fund_requests SET status = "approved" WHERE status = "pending"',
+    (err, result) => {
+      if (err) return res.status(500).json({ message: 'DB error during bulk approval' });
+
+      res.status(200).json({
+        message: `✅ ${result.affectedRows} pending request(s) approved`
+      });
+    }
+  );
+});
+
+// 📈 Generate report of fund transfers as CSV
+const fs = require('fs');
+const path = require('path');
+const { Parser } = require('json2csv');
+
+router.get('/reports/fund-transfers', verifyToken, (req, res) => {
+  if (req.user.role !== 1) {
+    return res.status(403).json({ message: 'Only Admins can generate reports' });
+  }
+
+  db.query(
+    `SELECT ft.id, ft.amount, ft.transfer_date, o.name AS office_name, m.name AS ministry_name
+     FROM fund_transfers ft
+     JOIN offices o ON ft.office_id = o.id
+     JOIN ministries m ON ft.ministry_id = m.id`,
+    (err, results) => {
+      if (err) return res.status(500).json({ message: 'DB error generating report' });
+
+      const fields = ['id', 'amount', 'transfer_date', 'office_name', 'ministry_name'];
+      const opts = { fields };
+
+      try {
+        const parser = new Parser(opts);
+        const csv = parser.parse(results);
+        const filePath = path.join(__dirname, '../exports/fund_transfers_report.csv');
+
+        fs.writeFileSync(filePath, csv);
+
+        res.download(filePath, 'fund_transfers_report.csv');
+      } catch (err) {
+        res.status(500).json({ message: 'Error generating CSV' });
+      }
+    }
+  );
+});
+
+// 📊 Export office incoming (funds received) vs outgoing (expenses) as CSV
+router.get('/reports/office-activity/:office_id/:fiscal_year', verifyToken, (req, res) => {
+  if (req.user.role !== 1) {
+    return res.status(403).json({ message: 'Only Admins can generate office activity reports' });
+  }
+ 
+  const { office_id, fiscal_year } = req.params;
+ 
+  const query = `
+    SELECT h.heading,
+      IFNULL(f.balance, 0) AS total_received,
+      IFNULL(SUM(e.amount), 0) AS total_spent
+    FROM (
+      SELECT DISTINCT heading FROM office_funds WHERE office_id = ? AND fiscal_year = ?
+    ) h
+    LEFT JOIN office_funds f ON f.office_id = ? AND f.fiscal_year = ? AND f.heading = h.heading
+    LEFT JOIN office_expenditures e ON e.office_id = ? AND e.fiscal_year = ? AND e.heading = h.heading
+    GROUP BY h.heading
+  `;
+ 
+  db.query(query, [office_id, fiscal_year, office_id, fiscal_year, office_id, fiscal_year], (err, results) => {
+    if (err) return res.status(500).json({ message: 'DB error generating activity report' });
+ 
+    const fields = ['heading', 'total_received', 'total_spent'];
+    const { Parser } = require('json2csv');
+    const parser = new Parser({ fields });
+ 
+    try {
+      const csv = parser.parse(results);
+      const fs = require('fs');
+      const path = require('path');
+      const filePath = path.join(__dirname, `../exports/office_activity_report_${office_id}_${fiscal_year}.csv`);
+ 
+      fs.writeFileSync(filePath, csv);
+      res.download(filePath, `office_activity_report_${office_id}_${fiscal_year}.csv`);
+    } catch (err) {
+      res.status(500).json({ message: 'Error generating CSV activity report' });
+    }
+  });
+});
 module.exports = router;
